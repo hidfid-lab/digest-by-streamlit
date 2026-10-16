@@ -1,76 +1,44 @@
 import os
 import streamlit as st
-import requests
-from yt_dlp import YoutubeDL
 from google import genai
 from google.genai.errors import ServerError, APIError
 
-# ==========================================
-# 🎨 頁面基本設定
-# ==========================================
-st.set_page_config(
-    page_title="YouTube AI 智慧摘要生成器",
-    page_icon="🎬",
-    layout="centered"
-)
+# 導入你原本的 API Key 讀取邏輯
+KEYS_FILE = "keys.txt"
+API_KEYS = []
 
-st.title("🎬 YouTube 影片 AI 智慧摘要生成器")
-st.markdown("貼上任意 YouTube 影片網址，透過 Gemini AI 快速萃取重點，並一鍵推送到 Telegram！")
+if os.path.exists(KEYS_FILE):
+    with open(KEYS_FILE, "r", encoding="utf-8") as f:
+        API_KEYS = [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
-# ==========================================
-# 🔑 API Key 與 Telegram 設定
-# ==========================================
-def get_api_keys():
-    try:
-        if "GEMINI_API_KEYS" in st.secrets:
-            keys = st.secrets["GEMINI_API_KEYS"]
-            if isinstance(keys, str):
-                return [k.strip() for k in keys.split(",") if k.strip()]
-            elif isinstance(keys, list):
-                return keys
-    except Exception:
-        pass
-    
-    env_keys = os.environ.get("GEMINI_API_KEYS", "")
-    if env_keys:
-        return [k.strip() for k in env_keys.split(",") if k.strip()]
-    
-    single_key = os.environ.get("GEMINI_API_KEY", "")
-    if single_key:
-        return [single_key]
-        
-    return []
+if not API_KEYS:
+    ENV_KEYS = os.environ.get("GEMINI_API_KEYS", "")
+    if ENV_KEYS:
+        API_KEYS = [k.strip() for k in ENV_KEYS.split(",") if k.strip()]
+    else:
+        single_key = os.environ.get("GEMINI_API_KEY", "")
+        if single_key:
+            API_KEYS = [single_key]
 
-API_KEYS = get_api_keys()
+# 讀取 Telegram 設定（可從環境變數或 Streamlit Secrets 讀取）
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# ==========================================
-# 🔍 輕量化取得影片資訊（失敗時自動略過，不擋下 Gemini）
-# ==========================================
-def get_video_info(video_url):
-    ydl_opts = {
-        "socket_timeout": 5,
-        "retries": 1,
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-    }
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            title = info.get("title", "YouTube 影片")
-            video_id = info.get("id")
-            clean_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else video_url
-            return clean_url, title
-    except Exception:
-        # 如果被 YouTube 擋下（Bot 驗證），直接回傳原始網址與通用標題，交給 Gemini 處理
-        return video_url, "YouTube 影片"
+# 支援從 Streamlit Cloud 的 Secrets 讀取
+try:
+    if "TELEGRAM_BOT_TOKEN" in st.secrets:
+        TELEGRAM_BOT_TOKEN = st.secrets["TELEGRAM_BOT_TOKEN"]
+    if "TELEGRAM_CHAT_ID" in st.secrets:
+        TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+    if "GEMINI_API_KEYS" in st.secrets:
+        secret_keys = st.secrets["GEMINI_API_KEYS"]
+        API_KEYS = [k.strip() for k in secret_keys.split(",") if k.strip()]
+except Exception:
+    pass
 
-# ==========================================
-# 🤖 Gemini 核心生成函數 (支援 Key 輪替)
-# ==========================================
 def generate_with_key_rotation(prompt, video_url):
     if not API_KEYS:
-        raise ValueError("未找到任何有效的 Gemini API Key！請在 Streamlit Secrets 中設定 GEMINI_API_KEYS。")
+        raise ValueError("未找到任何有效的 Gemini API Key！請檢查 keys.txt 或密鑰設定。")
     
     last_error = None
     for index, key in enumerate(API_KEYS):
@@ -86,102 +54,85 @@ def generate_with_key_rotation(prompt, video_url):
             continue
     raise Exception(f"所有 API Key 皆嘗試失敗，最後錯誤: {last_error}")
 
-# ==========================================
-# ✈️ Telegram 發送函數
-# ==========================================
 def send_telegram_message(message):
-    try:
-        bot_token = st.secrets.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
-        chat_id = st.secrets.get("TELEGRAM_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
-    except Exception:
-        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-
-    if not bot_token or not chat_id:
-        return False, "未設定 Telegram Bot Token 或 Chat ID"
-        
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message
-    }
+    import requests
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     response = requests.post(url, json=payload)
-    return (True, "發送成功") if response.status_code == 200 else (False, f"發送失敗: {response.text}")
+    return response.status_code == 200
 
-# ==========================================
-# 🖥️ 使用者介面設計 (UI)
-# ==========================================
+# ====================
+# Streamlit 網頁前端介面
+# ====================
+st.set_page_config(page_title="YouTube AI 摘要生成器", page_icon="🎬", layout="centered")
+
+st.title("🎬 YouTube 影片 AI 智慧摘要")
+st.write("貼上任意 YouTube 影片網址，即可一鍵生成結構化摘要，並可同步發送至 Telegram！")
+
 with st.form("summary_form"):
-    input_url = st.text_input("🔗 請輸入 YouTube 影片網址", placeholder="https://www.youtube.com/watch?v=...")
+    video_url = st.text_input("🔗 YouTube 影片網址", placeholder="https://www.youtube.com/watch?v=...")
     
-    style_option = st.selectbox(
-        "💡 選擇摘要風格與模板",
+    prompt_style = st.selectbox(
+        "📝 選擇摘要風格/模板",
         [
-            "政經/財經/知識型結構化摘要 (預設)",
-            "搞笑/情境短劇趣味剖析",
-            "簡明扼要重點摘要"
+            "深度政經/商業/科技分析（預設）",
+            "搞笑短劇/人性諷刺風格"
         ]
     )
     
-    submitted = st.form_submit_button("✨ 開始生成摘要並發送")
+    send_to_tg = st.checkbox("📤 同步發送到 Telegram 頻道", value=True)
+    
+    submitted = st.form_submit_button("🚀 開始生成摘要")
 
 if submitted:
-    if not input_url:
-        st.warning("⚠️ 請先輸入有效的 YouTube 影片網址！")
-    elif not API_KEYS:
-        st.error("❌ 系統未偵測到 Gemini API Key，請先至 Streamlit Secrets 設定。")
+    if not video_url:
+        st.warning("⚠️ 請先輸入 YouTube 影片網址！")
     else:
-        with st.spinner("🔄 正在解析影片中..."):
-            url, title = get_video_info(input_url)
-            
-        st.success("✅ 網址已送出！")
-        st.markdown(f"📌 **影片連結**：[{url}]({url})")
-
-        # 根據風格套用 Prompt
-        if "搞笑" in style_option:
-            prompt = f"""
-            請直接透過上方提供的 YouTube 影片連結，針對這部搞笑或情境短劇影片進行趣味與人性的深度剖析：
-            請嚴格依照下列三個區塊進行回覆，口吻需幽默、犀利且生活化，適合手機閱讀：
-            1. 一句話笑點與核心反轉：嚴格限制 30 個字以內，點出這部短片的戲劇張力或諷刺點。
-            2. 人性與社會諷刺：劇中角色反映了什麼樣的現代社會現象、職場生態或人性盲點？
-            3. 搞笑橋段與編劇邏輯：拆解其包袱、笑點鋪陳或出人意料的結局設計。
-            """
-            telegram_title = "YouTube 搞笑短片 AI 趣味剖析"
-        elif "簡明" in style_option:
-            prompt = f"""
-            請直接透過上方提供的 YouTube 影片連結，進行簡明扼要的重點萃取：
-            請提供：
-            1. 核心一句話總結 (30字內)
-            2. 3-5 點重要收穫與精華
-            """
-            telegram_title = "YouTube 影片快篩摘要"
-        else:
-            prompt = f"""
-            請直接透過上方提供的 YouTube 影片連結，進行深度結構化重點萃取：
-            請嚴格依照下列三個區塊進行回覆，排版需簡潔清晰，適合手機閱讀：
-            1. 一句話結論：嚴格限制 30 個字以內，直接講出核心結論。
-            2. 全局觀測：本集最重要的核心命題與趨勢。
-            3. 關鍵拆解：針對核心內容、技術應用或商業模式進行邏輯拆解。
-            4. 實踐視角：點出其中隱含的洞察與底層邏輯。
-            """
-            telegram_title = "YouTube 深度知識 AI 自動摘要"
-
-        with st.spinner("🤖 正在呼叫 Gemini 分析影片內容中，請稍候..."):
+        with st.spinner("⏳ 正在透過 Gemini 分析影片並生成摘要，請稍候..."):
             try:
-                summary = generate_with_key_rotation(prompt, url)
-                
-                st.markdown("---")
-                st.markdown("### 📋 摘要內容預覽")
-                st.markdown(summary)
-                
-                with st.spinner("✈️ 正在發送 Telegram 通知..."):
-                    message_content = f"【{telegram_title}】\n連結：{url}\n\n{summary}"
-                    success, msg = send_telegram_message(message_content)
+                # 根據選擇的風格套用對應 Prompt
+                if "搞笑短劇" in prompt_style:
+                    prompt = f"""
+                    請針對以下 YouTube 搞笑或情境短劇影片進行趣味與人性的深度剖析：
+                    影片連結：{video_url}
                     
-                    if success:
-                        st.success("✅ Telegram 訊息發送成功！")
-                    else:
-                        st.error(f"❌ Telegram 發送失敗：{msg}")
+                    請嚴格依照下列三個區塊進行回覆，口吻需幽默、犀利且生活化，適合手機閱讀：
+                    1. 一句話笑點與核心反轉：嚴格限制 30 個字以內，點出這部短片的戲劇張力或諷刺點。
+                    2. 人性與社會諷刺：劇中角色反映了什麼樣的現代社會現象、職場生態或人性盲點？
+                    3. 搞笑橋段與編劇邏輯：拆解其包袱、笑點鋪陳或出人意料的結局設計。
+                    """
+                    title_prefix = "搞笑短劇 AI 摘要"
+                else:
+                    prompt = f"""
+                    請針對以下 YouTube 影片進行深度結構化重點萃取：
+                    影片連結：{video_url}
+                    
+                    請嚴格依照下列三個區塊進行回覆，排版需簡潔清晰，適合手機閱讀：
+                    1. 一句話結論：嚴格限制 30 個字以內，直接講出核心結論。
+                    2. 全局觀測：本集最重要的核心命題與背景。
+                    3. 關鍵拆解：針對核心技術、觀點或商業模式進行邏輯拆解。
+                    4. 實踐視角：點出其中隱含的洞察與底層邏輯。
+                    """
+                    title_prefix = "YouTube 頻道 AI 自動摘要"
 
+                # 呼叫 Gemini
+                summary = generate_with_key_rotation(prompt, video_url)
+                
+                st.success("✅ 摘要生成完畢！")
+                st.markdown("---")
+                st.markdown(summary)
+                st.markdown("---")
+                
+                # 發送到 Telegram
+                if send_to_tg:
+                    message_content = f"【{title_prefix}】\n連結：{video_url}\n\n{summary}"
+                    success = send_telegram_message(message_content)
+                    if success:
+                        st.info("📨 已成功同步發送至 Telegram！")
+                    else:
+                        st.warning("⚠️ Telegram 發送失敗，請檢查 Token 與 Chat ID 設定。")
+                        
             except Exception as e:
-                st.error(f"❌ 發生錯誤：{str(e)}")
+                st.error(f"❌ 發生錯誤：{e}")
